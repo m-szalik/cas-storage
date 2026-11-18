@@ -59,7 +59,7 @@ func TestDeleteRouteNeedsAllowDelete(t *testing.T) {
 	q := "?unused_before=" + url.QueryEscape(time.Now().Add(time.Hour).Format(time.RFC3339))
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	off := httptest.NewServer(Handler(s, log, false))
+	off := httptest.NewServer(withTestKey(Handler(testAuth(s), log, false)))
 	defer off.Close()
 	req, _ := http.NewRequest(http.MethodDelete, off.URL+"/objects/"+hash+q, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -71,7 +71,7 @@ func TestDeleteRouteNeedsAllowDelete(t *testing.T) {
 		t.Fatalf("delete without allowDelete = %d", resp.StatusCode)
 	}
 
-	on := httptest.NewServer(Handler(s, log, true))
+	on := httptest.NewServer(withTestKey(Handler(testAuth(s), log, true)))
 	defer on.Close()
 	req, _ = http.NewRequest(http.MethodDelete, on.URL+"/objects/"+hash+q, nil)
 	resp, err = http.DefaultClient.Do(req)

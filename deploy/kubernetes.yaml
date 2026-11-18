@@ -1,5 +1,24 @@
 # cas-storage: one replica on one ReadWriteOnce volume (Recreate, so two pods
-# never write the same directory). Set the image to the one you pushed.
+# never write the same directory). Set the image to the one you pushed and
+# replace the placeholder API keys in the Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cas-storage-config
+type: Opaque
+stringData:
+  config.yaml: |
+    namespaces:
+      docs: {}           # /data/docs
+      images: {}         # /data/images
+    keys:
+      - key: "CHANGE-ME-docs-writer-key"
+        namespace: docs
+        permissions: [READ, CREATE, LABEL]
+      - key: "CHANGE-ME-images-reader-key"
+        namespace: images
+        permissions: [READ]
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -43,9 +62,14 @@ spec:
               value: "false"
             - name: STORAGE_COMPRESS
               value: "false"
+            - name: STORAGE_CONFIG
+              value: /etc/cas-storage/config.yaml
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: config
+              mountPath: /etc/cas-storage
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -60,6 +84,9 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: cas-storage-data
+        - name: config
+          secret:
+            secretName: cas-storage-config
 ---
 apiVersion: v1
 kind: Service

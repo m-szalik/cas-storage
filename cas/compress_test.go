@@ -76,7 +76,7 @@ func TestCompressedObjectServesLikePlain(t *testing.T) {
 	_, _, _, _ = packed.Put(bytes.NewReader(xmlDoc))
 
 	get := func(s *Store, method, rng string) (*http.Response, []byte) {
-		srv := httptest.NewServer(Handler(s, log, false))
+		srv := httptest.NewServer(withTestKey(Handler(testAuth(s), log, false)))
 		defer srv.Close()
 		req, _ := http.NewRequest(method, srv.URL+"/objects/"+hash, nil)
 		if rng != "" {

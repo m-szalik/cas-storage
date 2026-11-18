@@ -1,0 +1,11 @@
+# Local development config for `task run` (STORAGE_DIR=./data).
+# Use your own long random keys anywhere else.
+namespaces:
+  dev: {}            # stored in ./data/dev
+keys:
+  - key: "dev-key-0123456789abcdef"
+    namespace: dev
+    permissions: [READ, CREATE, DELETE, LABEL]
+  - key: "dev-readonly-0123456789"
+    namespace: dev
+    permissions: [READ]

@@ -126,7 +126,7 @@ func (s *Store) CompressExisting(ctx context.Context, log *slog.Logger) error {
 			return nil
 		}
 		defer func() { _ = os.Remove(tmp) }() // no-op after a successful rename
-		gz, err := s.swapToCompressed(p, tmp, fi.ModTime())
+		gz, err := s.swapToCompressed(d.Name(), p, tmp, fi.ModTime())
 		if err != nil {
 			log.Warn("compress object", "hash", d.Name(), "err", err)
 			return nil
@@ -149,9 +149,8 @@ func (s *Store) CompressExisting(ctx context.Context, log *slog.Logger) error {
 // swapToCompressed replaces the plain object p with the gzip file tmp, keeping
 // its mtime (Delete's last-put check). It answers the compressed size, or 0
 // when p is no longer there to replace.
-func (s *Store) swapToCompressed(p, tmp string, mtime time.Time) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) swapToCompressed(hash, p, tmp string, mtime time.Time) (int64, error) {
+	defer s.lock(hash)()
 	fi, err := os.Stat(p)
 	if os.IsNotExist(err) {
 		return 0, nil

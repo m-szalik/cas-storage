@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -32,11 +33,15 @@ var (
 type Store struct {
 	objectsDir string
 	tmpDir     string
+	labelsDir  string
 	// Compress stores new text, XML, HTML and JSON objects gzipped (see
 	// compress.go). Objects already gzipped are read either way.
 	Compress bool
-	// mu serialises the steps that pick or change an object's on-disk form.
-	mu sync.Mutex
+	// locks serialise, per hash, the steps that pick or change an object's
+	// on-disk form or its labels (lock striping: different objects rarely
+	// share a lock, so they do not wait for each other).
+	locks  [256]sync.Mutex
+	labels labelIndex
 }
 
 // Open prepares the on-disk layout under root and returns a Store.
@@ -44,8 +49,9 @@ func Open(root string) (*Store, error) {
 	s := &Store{
 		objectsDir: filepath.Join(root, "objects"),
 		tmpDir:     filepath.Join(root, "tmp"),
+		labelsDir:  filepath.Join(root, "labels"),
 	}
-	for _, d := range []string{s.objectsDir, s.tmpDir} {
+	for _, d := range []string{s.objectsDir, s.tmpDir, s.labelsDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, fmt.Errorf("cas: mkdir %s: %w", d, err)
 		}
@@ -57,7 +63,18 @@ func Open(root string) (*Store, error) {
 			_ = os.Remove(filepath.Join(s.tmpDir, e.Name()))
 		}
 	}
+	if err := s.loadLabels(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// lock takes the lock of hash's stripe and answers its unlock.
+func (s *Store) lock(hash string) func() {
+	n, _ := strconv.ParseUint(hash[:2], 16, 8)
+	m := &s.locks[n]
+	m.Lock()
+	return m.Unlock
 }
 
 // objectPath shards by the first two byte-pairs to keep directories small.
@@ -109,8 +126,7 @@ func (s *Store) Put(r io.Reader) (hash string, size int64, existed bool, err err
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock(hash)()
 	if s.touch(s.objectPath(hash)) {
 		return hash, size, true, nil
 	}
@@ -159,6 +175,11 @@ func (s *Store) Open(hash string) (io.ReadSeekCloser, os.FileInfo, error) {
 	if os.IsNotExist(err) {
 		f, err = os.Open(p + gzSuffix)
 		gz = true
+		if os.IsNotExist(err) {
+			// Deleted and put again (plain) between the two opens.
+			f, err = os.Open(p)
+			gz = false
+		}
 	}
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -183,14 +204,13 @@ func (s *Store) Open(hash string) (io.ReadSeekCloser, os.FileInfo, error) {
 }
 
 // Delete removes the object unless it was put at or after unusedBefore (a
-// writer still needs it). It answers the object's size and whether it was
-// removed; an absent object is ErrNotFound.
+// writer still needs it), together with its labels. It answers the object's
+// size and whether it was removed; an absent object is ErrNotFound.
 func (s *Store) Delete(hash string, unusedBefore time.Time) (size int64, deleted bool, err error) {
 	if !ValidHash(hash) {
 		return 0, false, ErrNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock(hash)()
 	f, fi, err := s.Open(hash)
 	if err != nil {
 		return 0, false, err
@@ -199,15 +219,20 @@ func (s *Store) Delete(hash string, unusedBefore time.Time) (size int64, deleted
 	if !fi.ModTime().Before(unusedBefore) {
 		return fi.Size(), false, nil
 	}
-	p := s.objectPath(hash)
+	p, other := s.objectPath(hash), s.objectPath(hash)+gzSuffix
 	if _, gz := fi.(gzInfo); gz {
-		p += gzSuffix
+		p, other = other, p
 	}
 	if err := os.Remove(p); err != nil {
 		if os.IsNotExist(err) {
 			return 0, false, ErrNotFound
 		}
 		return 0, false, err
+	}
+	// Both forms exist only after a crash in the middle of CompressExisting.
+	_ = os.Remove(other)
+	if err := s.dropLabels(hash); err != nil {
+		return fi.Size(), true, err
 	}
 	return fi.Size(), true, nil
 }

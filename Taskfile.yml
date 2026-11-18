@@ -35,10 +35,10 @@ tasks:
       - 'CGO_ENABLED=0 {{.GO}} build -trimpath -o bin/cas-storage ./cmd/cas-storage'
 
   run:
-    desc: 'Run locally on :8080 with ./data (e.g. STORAGE_COMPRESS=true task run)'
+    desc: 'Run locally on :8080 with ./data and config.example.yaml (e.g. STORAGE_COMPRESS=true task run)'
     deps: [build]
     cmds:
-      - 'STORAGE_DIR=./data LISTEN_ADDR=:8080 ./bin/cas-storage'
+      - 'STORAGE_DIR=./data STORAGE_CONFIG=./config.example.yaml LISTEN_ADDR=:8080 ./bin/cas-storage'
 
   image:
     desc: 'Build the Docker image {{.IMAGE}}:<git describe>'
