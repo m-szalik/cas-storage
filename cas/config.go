@@ -117,6 +117,16 @@ func (c Config) Open(storageDir string, compress bool) (*Auth, error) {
 		roots[name] = abs
 	}
 
+	// A store owns these entries of its root; another namespace may not sit
+	// there.
+	for abs, name := range paths {
+		for _, reserved := range []string{"objects", "tmp", "labels", labelsDBFile} {
+			if other, ok := paths[filepath.Join(abs, reserved)]; ok {
+				return nil, fmt.Errorf("namespace %s: path inside namespace %s (%s)", other, name, reserved)
+			}
+		}
+	}
+
 	auth := &Auth{Namespaces: map[string]*Store{}, keys: map[[sha256.Size]byte]*access{}}
 	for i, k := range c.Keys {
 		if len(k.Key) < minKeyLen {
@@ -146,6 +156,7 @@ func (c Config) Open(storageDir string, compress bool) (*Auth, error) {
 	for name, root := range roots {
 		s, err := Open(root)
 		if err != nil {
+			_ = auth.Close()
 			return nil, fmt.Errorf("namespace %s: %w", name, err)
 		}
 		s.Compress = compress
@@ -159,6 +170,15 @@ func (c Config) Open(storageDir string, compress bool) (*Auth, error) {
 		a.store = auth.Namespaces[a.namespace]
 	}
 	return auth, nil
+}
+
+// Close closes the stores of all namespaces.
+func (a *Auth) Close() error {
+	var errs []error
+	for _, s := range a.Namespaces {
+		errs = append(errs, s.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // KeyCount is the number of configured API keys.

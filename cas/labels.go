@@ -1,6 +1,7 @@
 package cas
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +11,17 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 	"unicode/utf8"
+
+	bolt "go.etcd.io/bbolt"
 )
 
-// Labels are a small key=value map per object, kept in
-// <root>/labels/ab/cd/<hash>.json and mirrored in memory for search.
+// Labels are a small key=value map per object, kept in the bbolt database
+// <root>/labels.db:
+//
+//	bucket "labels": <hash> -> JSON map of the object's labels
+//	bucket "index":  <key> 0x00 <value> 0x00 <hash> -> empty (for search)
 
 // ErrInvalidLabel is returned for a malformed label key or value, too many
 // labels on one object, or an empty search.
@@ -24,24 +30,21 @@ var ErrInvalidLabel = errors.New("invalid label")
 const (
 	maxLabels     = 64
 	maxLabelValue = 256
-	labelSuffix   = ".json"
+	labelsDBFile  = "labels.db"
 )
 
-var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
+var (
+	labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$`)
 
-// labelIndex mirrors the label files: labels by hash and hashes by key and
-// value. Writers hold the object's hash lock as well, so the file and the
-// index change together.
-type labelIndex struct {
-	mu     sync.RWMutex
-	byHash map[string]map[string]string
-	byKey  map[string]map[string]map[string]struct{} // key -> value -> hashes
-}
+	labelsBucket = []byte("labels")
+	indexBucket  = []byte("index")
+)
 
 func validLabelKey(k string) bool { return labelKeyRe.MatchString(k) }
 
+// validLabelValue also rejects NUL, the separator of the index keys.
 func validLabelValue(v string) bool {
-	return len(v) > 0 && len(v) <= maxLabelValue && utf8.ValidString(v)
+	return len(v) > 0 && len(v) <= maxLabelValue && utf8.ValidString(v) && !strings.ContainsRune(v, 0)
 }
 
 func checkLabels(m map[string]string) error {
@@ -59,146 +62,156 @@ func checkLabels(m map[string]string) error {
 	return nil
 }
 
-func (s *Store) labelPath(hash string) string {
-	return filepath.Join(s.labelsDir, hash[0:2], hash[2:4], hash+labelSuffix)
+// indexKey is the index entry of hash's label k=v; indexPrefix(k, v) is its
+// prefix, indexPrefix(k, "") the prefix of k with any value.
+func indexKey(k, v, hash string) []byte { return append(indexPrefix(k, v), hash...) }
+
+func indexPrefix(k, v string) []byte {
+	b := append([]byte(k), 0)
+	if v != "" {
+		b = append(append(b, v...), 0)
+	}
+	return b
 }
 
-// set replaces hash's labels in the index (none drops it).
-func (x *labelIndex) set(hash string, m map[string]string) {
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	for k, v := range x.byHash[hash] {
-		hs := x.byKey[k][v]
-		delete(hs, hash)
-		if len(hs) == 0 {
-			delete(x.byKey[k], v)
-			if len(x.byKey[k]) == 0 {
-				delete(x.byKey, k)
+// openLabels opens (or creates) the label database and imports the label
+// files of the earlier <root>/labels/ab/cd/<hash>.json layout.
+func (s *Store) openLabels(root string) error {
+	db, err := bolt.Open(filepath.Join(root, labelsDBFile), 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	if err != nil {
+		return fmt.Errorf("cas: open labels: %w", err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		for _, b := range [][]byte{labelsBucket, indexBucket} {
+			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
+				return err
 			}
 		}
-	}
-	if len(m) == 0 {
-		delete(x.byHash, hash)
-		return
-	}
-	x.byHash[hash] = m
-	for k, v := range m {
-		if x.byKey[k] == nil {
-			x.byKey[k] = map[string]map[string]struct{}{}
-		}
-		if x.byKey[k][v] == nil {
-			x.byKey[k][v] = map[string]struct{}{}
-		}
-		x.byKey[k][v][hash] = struct{}{}
-	}
-}
-
-// current answers a copy of hash's labels, never nil.
-func (x *labelIndex) current(hash string) map[string]string {
-	x.mu.RLock()
-	defer x.mu.RUnlock()
-	m := make(map[string]string, len(x.byHash[hash]))
-	for k, v := range x.byHash[hash] {
-		m[k] = v
-	}
-	return m
-}
-
-// loadLabels rebuilds the index from the label files. Unreadable or invalid
-// files are skipped; files of objects that are gone (a crash inside Delete)
-// are removed.
-func (s *Store) loadLabels() error {
-	s.labels.byHash = map[string]map[string]string{}
-	s.labels.byKey = map[string]map[string]map[string]struct{}{}
-	return filepath.WalkDir(s.labelsDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == s.labelsDir {
-				return fmt.Errorf("cas: labels: %w", err)
-			}
-			return nil
-		}
-		hash, ok := strings.CutSuffix(d.Name(), labelSuffix)
-		if d.IsDir() || !ok || !ValidHash(hash) || p != s.labelPath(hash) {
-			return nil
-		}
-		if !s.exists(s.objectPath(hash)) {
-			_ = os.Remove(p)
-			return nil
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return nil
-		}
-		var m map[string]string
-		if json.Unmarshal(b, &m) != nil || checkLabels(m) != nil {
-			return nil
-		}
-		s.labels.set(hash, m)
 		return nil
 	})
+	if err == nil {
+		s.db = db
+		err = s.importLabelFiles(filepath.Join(root, "labels"))
+	}
+	if err != nil {
+		_ = db.Close()
+		s.db = nil
+		return fmt.Errorf("cas: labels: %w", err)
+	}
+	return nil
 }
 
-// writeLabels stores m as hash's labels (none removes the file) and updates
-// the index. The caller holds hash's lock.
-func (s *Store) writeLabels(hash string, m map[string]string) error {
-	p := s.labelPath(hash)
-	if len(m) == 0 {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("cas: remove labels: %w", err)
-		}
-		s.labels.set(hash, nil)
+// importLabelFiles moves the labels of the file layout
+// (<dir>/ab/cd/<hash>.json) into the database and removes those files and the
+// directories they leave empty. Invalid files and those of absent objects are
+// dropped; anything else in dir is left alone.
+func (s *Store) importLabelFiles(dir string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
+	}
+	var files, dirs []string
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				dirs = append(dirs, p)
+				return nil
+			}
+			hash, ok := strings.CutSuffix(d.Name(), ".json")
+			if !ok || !ValidHash(hash) || p != filepath.Join(dir, hash[0:2], hash[2:4], d.Name()) {
+				return nil
+			}
+			files = append(files, p)
+			if !s.exists(s.objectPath(hash)) {
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			var m map[string]string
+			if json.Unmarshal(b, &m) != nil || checkLabels(m) != nil {
+				return nil
+			}
+			return putLabels(tx, hash, m)
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("import %s: %w", dir, err)
+	}
+	for _, f := range files {
+		_ = os.Remove(f)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i]) // only empty ones go
+	}
+	return nil
+}
+
+// Close closes the label database.
+func (s *Store) Close() error {
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+// getLabels answers hash's labels, never nil.
+func getLabels(tx *bolt.Tx, hash string) (map[string]string, error) {
+	m := map[string]string{}
+	if b := tx.Bucket(labelsBucket).Get([]byte(hash)); b != nil {
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, fmt.Errorf("cas: labels of %s: %w", hash, err)
+		}
+	}
+	return m, nil
+}
+
+// putLabels replaces hash's labels and their index entries (none removes
+// them).
+func putLabels(tx *bolt.Tx, hash string, m map[string]string) error {
+	old, err := getLabels(tx, hash)
+	if err != nil {
+		return err
+	}
+	idx := tx.Bucket(indexBucket)
+	for k, v := range old {
+		if err := idx.Delete(indexKey(k, v, hash)); err != nil {
+			return err
+		}
+	}
+	if len(m) == 0 {
+		return tx.Bucket(labelsBucket).Delete([]byte(hash))
+	}
+	for k, v := range m {
+		if err := idx.Put(indexKey(k, v, hash), nil); err != nil {
+			return err
+		}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	if err := s.writeFileAtomic(p, b); err != nil {
-		return fmt.Errorf("cas: write labels: %w", err)
-	}
-	s.labels.set(hash, m)
-	return nil
-}
-
-// writeFileAtomic writes b to a temp file, flushes it and renames it to p, so
-// p is always either the old or the new content; the directory is synced so
-// the rename survives a crash.
-func (s *Store) writeFileAtomic(p string, b []byte) error {
-	tmp, err := os.CreateTemp(s.tmpDir, "labels-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }() // no-op after a successful rename
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := mkdirAll(filepath.Dir(p)); err != nil {
-		return err
-	}
-	if err := os.Rename(name, p); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(p))
+	return tx.Bucket(labelsBucket).Put([]byte(hash), b)
 }
 
 // dropLabels removes all of hash's labels. The caller holds hash's lock.
-func (s *Store) dropLabels(hash string) error { return s.writeLabels(hash, nil) }
+func (s *Store) dropLabels(hash string) error {
+	return s.db.Batch(func(tx *bolt.Tx) error { return putLabels(tx, hash, nil) })
+}
 
 // Labels answers the object's labels (empty when it has none).
-func (s *Store) Labels(hash string) (map[string]string, error) {
+func (s *Store) Labels(hash string) (m map[string]string, err error) {
 	if !ValidHash(hash) || !s.exists(s.objectPath(hash)) {
 		return nil, ErrNotFound
 	}
-	return s.labels.current(hash), nil
+	err = s.db.View(func(tx *bolt.Tx) error {
+		m, err = getLabels(tx, hash)
+		return err
+	})
+	return m, err
 }
 
 // SetLabel sets the object's label key to value.
@@ -212,19 +225,13 @@ func (s *Store) SetLabel(hash, key, value string) error {
 	if !validLabelValue(value) {
 		return fmt.Errorf("%w: value of %q", ErrInvalidLabel, key)
 	}
-	defer s.lock(hash)()
-	if !s.exists(s.objectPath(hash)) {
-		return ErrNotFound
-	}
-	m := s.labels.current(hash)
-	if old, ok := m[key]; ok && old == value {
-		return nil
-	}
-	m[key] = value
-	if err := checkLabels(m); err != nil {
-		return err
-	}
-	return s.writeLabels(hash, m)
+	return s.updateLabels(hash, func(m map[string]string) bool {
+		if old, ok := m[key]; ok && old == value {
+			return false
+		}
+		m[key] = value
+		return true
+	})
 }
 
 // DeleteLabel removes the object's label key; a missing label is not an error.
@@ -235,16 +242,37 @@ func (s *Store) DeleteLabel(hash, key string) error {
 	if !validLabelKey(key) {
 		return fmt.Errorf("%w: key %q", ErrInvalidLabel, key)
 	}
+	return s.updateLabels(hash, func(m map[string]string) bool {
+		if _, ok := m[key]; !ok {
+			return false
+		}
+		delete(m, key)
+		return true
+	})
+}
+
+// updateLabels applies change to the labels of an existing object, under its
+// lock (so it cannot race a Delete), and stores them when change reports a
+// difference. Concurrent updates share one bbolt commit (Batch); change may
+// run more than once, so it must only depend on the map it gets.
+func (s *Store) updateLabels(hash string, change func(map[string]string) bool) error {
 	defer s.lock(hash)()
 	if !s.exists(s.objectPath(hash)) {
 		return ErrNotFound
 	}
-	m := s.labels.current(hash)
-	if _, ok := m[key]; !ok {
-		return nil
-	}
-	delete(m, key)
-	return s.writeLabels(hash, m)
+	return s.db.Batch(func(tx *bolt.Tx) error {
+		m, err := getLabels(tx, hash)
+		if err != nil {
+			return err
+		}
+		if !change(m) {
+			return nil
+		}
+		if err := checkLabels(m); err != nil {
+			return err
+		}
+		return putLabels(tx, hash, m)
+	})
 }
 
 // FindByLabels answers, sorted, the hashes of the objects that carry every
@@ -261,47 +289,29 @@ func (s *Store) FindByLabels(sel map[string]string) ([]string, error) {
 			return nil, fmt.Errorf("%w: value of %q", ErrInvalidLabel, k)
 		}
 	}
-	x := &s.labels
-	x.mu.RLock()
-	defer x.mu.RUnlock()
-	// Scan the hashes of the most selective selector, check the rest.
-	var cands []map[string]struct{}
-	best := -1
-	for k, v := range sel {
-		var sets []map[string]struct{}
-		if v != "" {
-			sets = []map[string]struct{}{x.byKey[k][v]}
-		} else {
-			for _, hs := range x.byKey[k] {
-				sets = append(sets, hs)
+	var found map[string]int // hash -> number of selectors it matched
+	err := s.db.View(func(tx *bolt.Tx) error {
+		found = map[string]int{}
+		c := tx.Bucket(indexBucket).Cursor()
+		for k, v := range sel {
+			prefix := indexPrefix(k, v)
+			for ik, _ := c.Seek(prefix); ik != nil && bytes.HasPrefix(ik, prefix); ik, _ = c.Next() {
+				// A key has one value per object, so each selector counts
+				// a hash at most once.
+				found[string(ik[len(ik)-64:])]++
 			}
 		}
-		n := 0
-		for _, hs := range sets {
-			n += len(hs)
-		}
-		if best < 0 || n < best {
-			cands, best = sets, n
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	out := make([]string, 0, best)
-	for _, hs := range cands {
-		for h := range hs {
-			if matches(x.byHash[h], sel) {
-				out = append(out, h)
-			}
+	out := make([]string, 0, len(found))
+	for h, n := range found {
+		if n == len(sel) {
+			out = append(out, h)
 		}
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-func matches(m, sel map[string]string) bool {
-	for k, v := range sel {
-		got, ok := m[k]
-		if !ok || (v != "" && got != v) {
-			return false
-		}
-	}
-	return true
 }

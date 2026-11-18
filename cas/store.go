@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/m-szalik/goutils"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
@@ -33,7 +34,6 @@ var (
 type Store struct {
 	objectsDir string
 	tmpDir     string
-	labelsDir  string
 	// Compress stores new text, XML, HTML and JSON objects gzipped (see
 	// compress.go). Objects already gzipped are read either way.
 	Compress bool
@@ -43,18 +43,19 @@ type Store struct {
 	// locks serialise, per hash, the steps that pick or change an object's
 	// on-disk form or its labels (lock striping: different objects rarely
 	// share a lock, so they do not wait for each other).
-	locks  [256]sync.Mutex
-	labels labelIndex
+	locks [256]sync.Mutex
+	// db holds the labels (see labels.go).
+	db *bolt.DB
 }
 
-// Open prepares the on-disk layout under root and returns a Store.
+// Open prepares the on-disk layout under root and returns a Store. Close it
+// to release its label database.
 func Open(root string) (*Store, error) {
 	s := &Store{
 		objectsDir: filepath.Join(root, "objects"),
 		tmpDir:     filepath.Join(root, "tmp"),
-		labelsDir:  filepath.Join(root, "labels"),
 	}
-	for _, d := range []string{s.objectsDir, s.tmpDir, s.labelsDir} {
+	for _, d := range []string{s.objectsDir, s.tmpDir} {
 		if err := mkdirAll(d); err != nil {
 			return nil, fmt.Errorf("cas: mkdir %s: %w", d, err)
 		}
@@ -66,7 +67,7 @@ func Open(root string) (*Store, error) {
 			_ = os.Remove(filepath.Join(s.tmpDir, e.Name()))
 		}
 	}
-	if err := s.loadLabels(); err != nil {
+	if err := s.openLabels(root); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -262,6 +263,11 @@ func (s *Store) Delete(hash string, unusedBefore time.Time) (size int64, deleted
 	if !fi.ModTime().Before(unusedBefore) {
 		return fi.Size(), false, nil
 	}
+	// Labels go first: a crash in between leaves an unlabelled object, never
+	// labels of an absent one.
+	if err := s.dropLabels(hash); err != nil {
+		return 0, false, err
+	}
 	p, other := s.objectPath(hash), s.objectPath(hash)+gzSuffix
 	if _, gz := fi.(gzInfo); gz {
 		p, other = other, p
@@ -274,8 +280,5 @@ func (s *Store) Delete(hash string, unusedBefore time.Time) (size int64, deleted
 	}
 	// Both forms exist only after a crash in the middle of CompressExisting.
 	_ = os.Remove(other)
-	if err := s.dropLabels(hash); err != nil {
-		return fi.Size(), true, err
-	}
 	return fi.Size(), true, nil
 }

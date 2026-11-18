@@ -80,5 +80,8 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+	if err := auth.Close(); err != nil {
+		log.Error("close stores", "err", err)
+	}
 	log.Info("cas-storage stopped")
 }

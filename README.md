@@ -28,7 +28,7 @@ before; every route works on the key's namespace only.
 | `GET` | `/healthz` | none | liveness |
 
 Labels: key `^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$` (may contain `/`), value
-1–256 bytes of UTF-8, at most 64 labels per object. A bad key, value or
+1–256 bytes of UTF-8 without NUL, at most 64 labels per object. A bad key, value or
 selector gets `400`. Labels are only stored and searched; they do not change
 the object.
 
@@ -52,8 +52,11 @@ content put in two namespaces is stored twice.
    compares `unused_before` with that mtime, so a caller that re-puts an
    object protects it from a concurrent prune.
 4. Leftovers in `tmp/` are removed at start.
-5. Labels live in `<root>/labels/ab/cd/<hash>.json` (written atomically) and
-   are indexed in memory at start for the search.
+5. Labels live in the bbolt database `<root>/labels.db`: a bucket of the
+   labels by hash and an index bucket (`key\0value\0hash`) that the search
+   scans by prefix. Concurrent label changes share one commit. Label files of
+   the earlier `<root>/labels/ab/cd/<hash>.json` layout are imported at start
+   and removed.
 
 ### Compression
 
@@ -104,8 +107,8 @@ keys:
    (powers of 1024). Default `500MB`; `0` means no limit.
 
 Objects stored before namespaces existed sit in `<STORAGE_DIR>/objects`; to
-keep serving them, give one namespace `path: <STORAGE_DIR>` (and name no other
-namespace `objects`, `tmp` or `labels`).
+keep serving them, give one namespace `path: <STORAGE_DIR>`. A namespace path
+may not be another namespace's `objects`, `tmp`, `labels` or `labels.db`.
 
 ## Go client
 

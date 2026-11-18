@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func putString(t *testing.T, s *Store, content string) string {
@@ -20,6 +22,19 @@ func putString(t *testing.T, s *Store, content string) string {
 		t.Fatal(err)
 	}
 	return hash
+}
+
+// hasLabelRow reports whether the label database has a row for hash.
+func hasLabelRow(t *testing.T, s *Store, hash string) bool {
+	t.Helper()
+	var ok bool
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		ok = tx.Bucket(labelsBucket).Get([]byte(hash)) != nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return ok
 }
 
 func TestLabelsCRUD(t *testing.T) {
@@ -51,11 +66,11 @@ func TestLabelsCRUD(t *testing.T) {
 	if m, _ := s.Labels(h); !reflect.DeepEqual(m, want) {
 		t.Fatalf("labels = %v, want %v", m, want)
 	}
-	// The file goes once the last label does.
+	// The row goes once the last label does.
 	_ = s.DeleteLabel(h, "source")
 	_ = s.DeleteLabel(h, "a/b.c-d_e")
-	if _, err := os.Stat(s.labelPath(h)); !os.IsNotExist(err) {
-		t.Fatalf("label file still there: %v", err)
+	if hasLabelRow(t, s, h) {
+		t.Fatal("label row still there")
 	}
 }
 
@@ -64,7 +79,7 @@ func TestLabelsValidation(t *testing.T) {
 	h := putString(t, s, "validated")
 	for _, kv := range [][2]string{
 		{"", "v"}, {"-k", "v"}, {"k k", "v"}, {strings.Repeat("k", 64), "v"},
-		{"k", ""}, {"k", strings.Repeat("v", 257)}, {"k", "\xff"},
+		{"k", ""}, {"k", strings.Repeat("v", 257)}, {"k", "\xff"}, {"k", "a\x00b"},
 	} {
 		if err := s.SetLabel(h, kv[0], kv[1]); !errors.Is(err, ErrInvalidLabel) {
 			t.Fatalf("SetLabel(%q, %q) = %v", kv[0], kv[1], err)
@@ -146,15 +161,15 @@ func TestLabelsSurviveReopen(t *testing.T) {
 	h := putString(t, s, "persistent")
 	_ = s.SetLabel(h, "src", "ted")
 	_ = s.SetLabel(h, "lang", "pl")
-	// Junk in the labels tree is ignored.
-	junk := filepath.Join(root, "labels", "ab", "cd", strings.Repeat("a", 64)+".json")
-	_ = os.MkdirAll(filepath.Dir(junk), 0o755)
-	_ = os.WriteFile(junk, []byte("{not json"), 0o644)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	s2, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s2.Close()
 	want := map[string]string{"src": "ted", "lang": "pl"}
 	if m, _ := s2.Labels(h); !reflect.DeepEqual(m, want) {
 		t.Fatalf("labels after reopen = %v", m)
@@ -164,16 +179,58 @@ func TestLabelsSurviveReopen(t *testing.T) {
 	}
 }
 
-func TestDeleteRemovesLabels(t *testing.T) {
+func TestOpenImportsLabelFiles(t *testing.T) {
 	root := t.TempDir()
 	s, _ := Open(root)
+	h := putString(t, s, "labelled before bbolt")
+	_ = s.Close()
+	write := func(hash, content string) {
+		p := filepath.Join(root, "labels", hash[0:2], hash[2:4], hash+".json")
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte(content), 0o644)
+	}
+	write(h, `{"src":"ted"}`)
+	write(strings.Repeat("a", 64), `{"src":"absent object"}`)
+	write(strings.Repeat("b", 64), "{not json")
+
+	s2, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if m, _ := s2.Labels(h); !reflect.DeepEqual(m, map[string]string{"src": "ted"}) {
+		t.Fatalf("imported labels = %v", m)
+	}
+	if got, _ := s2.FindByLabels(map[string]string{"src": ""}); !reflect.DeepEqual(got, []string{h}) {
+		t.Fatalf("search = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "labels")); !os.IsNotExist(err) {
+		t.Fatalf("labels directory kept: %v", err)
+	}
+	// Files that are not label files are left alone.
+	other := filepath.Join(root, "labels", "keep.txt")
+	_ = os.MkdirAll(filepath.Dir(other), 0o755)
+	_ = os.WriteFile(other, []byte("x"), 0o644)
+	_ = s2.Close()
+	s3, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("unrelated file removed: %v", err)
+	}
+}
+
+func TestDeleteRemovesLabels(t *testing.T) {
+	s, _ := Open(t.TempDir())
 	h, _, _, _ := s.Put(bytes.NewReader(xmlDoc))
 	_ = s.SetLabel(h, "src", "ted")
 	if _, deleted, err := s.Delete(h, time.Now().Add(time.Second)); err != nil || !deleted {
 		t.Fatalf("delete = %v, %v", deleted, err)
 	}
-	if _, err := os.Stat(s.labelPath(h)); !os.IsNotExist(err) {
-		t.Fatalf("label file still there: %v", err)
+	if hasLabelRow(t, s, h) {
+		t.Fatal("label row still there")
 	}
 	if got, _ := s.FindByLabels(map[string]string{"src": ""}); len(got) != 0 {
 		t.Fatalf("deleted object still found: %v", got)
@@ -182,17 +239,5 @@ func TestDeleteRemovesLabels(t *testing.T) {
 	_, _, _, _ = s.Put(bytes.NewReader(xmlDoc))
 	if m, err := s.Labels(h); err != nil || len(m) != 0 {
 		t.Fatalf("labels after re-put = %v, %v", m, err)
-	}
-	// A label file left by a crash inside Delete is dropped at Open.
-	s.Delete(h, time.Now().Add(time.Second))
-	orphan := s.labelPath(h)
-	_ = os.MkdirAll(filepath.Dir(orphan), 0o755)
-	_ = os.WriteFile(orphan, []byte(`{"src":"ted"}`), 0o644)
-	s2, _ := Open(root)
-	if got, _ := s2.FindByLabels(map[string]string{"src": ""}); len(got) != 0 {
-		t.Fatalf("orphan labels loaded: %v", got)
-	}
-	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Fatalf("orphan label file kept: %v", err)
 	}
 }

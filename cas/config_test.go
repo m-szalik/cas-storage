@@ -86,6 +86,7 @@ func TestLoadConfigRejectsInvalid(t *testing.T) {
 		"unknown perm":     {"namespaces:\n  a: {}\nkeys:" + key(good, "a", "READ, WRITE"), "unknown permission"},
 		"lowercase perm":   {"namespaces:\n  a: {}\nkeys:" + key(good, "a", "read"), "unknown permission"},
 		"no perms":         {"namespaces:\n  a: {}\nkeys:" + key(good, "a", ""), "no permissions"},
+		"ns in ns":         {"namespaces:\n  a: {path: /tmp/x}\n  b: {path: /tmp/x/labels}", "path inside namespace a"},
 		"bad size":         {"max_upload_size: 5XB", "invalid size"},
 		"negative size":    {"namespaces:\n  a: {max_upload_size: -1}", "invalid size"},
 	} {

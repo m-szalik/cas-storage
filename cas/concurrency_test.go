@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -231,7 +230,9 @@ func TestConcurrentSetLabelKeepsAll(t *testing.T) {
 	if m, _ := s.Labels(h); len(m) != n {
 		t.Fatalf("%d labels, want %d", len(m), n)
 	}
+	_ = s.Close()
 	s2, _ := Open(root)
+	defer s2.Close()
 	if m, _ := s2.Labels(h); len(m) != n {
 		t.Fatalf("%d labels on disk, want %d", len(m), n)
 	}
@@ -257,8 +258,8 @@ func TestConcurrentSetLabelAndDelete(t *testing.T) {
 		}
 		wg.Wait()
 		// A label set after the delete got ErrNotFound; none may linger.
-		if _, err := os.Stat(s.labelPath(h)); !os.IsNotExist(err) {
-			t.Fatalf("labels of a deleted object left on disk: %v", err)
+		if hasLabelRow(t, s, h) {
+			t.Fatal("labels of a deleted object left in the database")
 		}
 		if got, _ := s.FindByLabels(map[string]string{"k0": ""}); len(got) != 0 {
 			t.Fatalf("labels of a deleted object indexed: %v", got)
