@@ -18,7 +18,7 @@ import (
 func objectFiles(t *testing.T, s *Store) int {
 	t.Helper()
 	n := 0
-	err := filepath.WalkDir(s.objectsDir, func(_ string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(s.blobs.(*FSBackend).dir, func(_ string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
 			n++
 		}

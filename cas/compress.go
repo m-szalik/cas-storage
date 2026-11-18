@@ -5,23 +5,20 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/m-szalik/goutils"
 )
 
-// Compressed objects live next to where the plain one would, as <hash>.gz.
-// An object exists in exactly one of the two forms; the id is always the hash
-// of the uncompressed bytes, so clients never see the difference.
-const gzSuffix = ".gz"
+// A compressed object is stored as its gzip blob (Blob.Gzip) in place of the
+// plain one. An object exists in exactly one of the two forms; the id is
+// always the hash of the uncompressed bytes, so clients never see the
+// difference.
 
 const (
 	// minCompressSize skips objects too small for gzip to pay off.
@@ -37,17 +34,16 @@ func compressible(head []byte) bool {
 	return strings.HasPrefix(http.DetectContentType(head), "text/")
 }
 
-// compressFile gzips src into a new temp file and answers its name when the
-// result is smaller than the original; "" means keep src as it is.
-func (s *Store) compressFile(src string, size int64) (string, error) {
+// compressFile gzips the size bytes of in into a new temp file and answers
+// its name when the result is smaller than the original; "" means keep the
+// content as it is.
+func (s *Store) compressFile(in io.ReadSeeker, size int64) (string, error) {
 	if size < minCompressSize || size > maxCompressSize {
 		return "", nil
 	}
-	in, err := os.Open(src)
-	if err != nil {
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	defer goutils.CloseQuietly(in)
 	head := make([]byte, 512)
 	n, err := io.ReadFull(in, head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -95,45 +91,36 @@ func (s *Store) compressFile(src string, size int64) (string, error) {
 	return name, nil
 }
 
-// CompressExisting gzips the plain objects already on disk that Put would
-// compress today. It is idempotent and safe to stop at any point: each object
-// switches form with one rename, and readers fall back to the other form.
+// CompressExisting gzips the plain objects already stored that Put would
+// compress today. It is idempotent and safe to stop at any point: the gzip
+// blob is imported before the plain one is removed, and readers fall back to
+// the other form.
 func (s *Store) CompressExisting(ctx context.Context, log *slog.Logger) error {
 	start := time.Now()
 	var scanned, compressed int
 	var before, after int64
-	err := filepath.WalkDir(s.objectsDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() || !ValidHash(d.Name()) {
+	err := s.blobs.Walk(ctx, func(b Blob, info BlobInfo) error {
+		if b.Gzip {
 			return nil
 		}
 		scanned++
-		fi, err := d.Info()
+		tmp, err := s.compressBlob(b, info.Size)
 		if err != nil {
-			return nil // removed meanwhile
-		}
-		tmp, err := s.compressFile(p, fi.Size())
-		if err != nil {
-			log.Warn("compress object", "hash", d.Name(), "err", err)
+			log.Warn("compress object", "hash", b.Hash, "err", err)
 			return nil
 		}
 		if tmp == "" {
 			return nil
 		}
-		defer func() { _ = os.Remove(tmp) }() // no-op after a successful rename
-		gz, err := s.swapToCompressed(d.Name(), p, tmp, fi.ModTime())
+		defer func() { _ = os.Remove(tmp) }() // no-op after a successful import
+		gz, err := s.swapToCompressed(b.Hash, tmp, info.ModTime)
 		if err != nil {
-			log.Warn("compress object", "hash", d.Name(), "err", err)
+			log.Warn("compress object", "hash", b.Hash, "err", err)
 			return nil
 		}
 		if gz > 0 {
 			compressed++
-			before += fi.Size()
+			before += info.Size
 			after += gz
 		}
 		if scanned%50000 == 0 {
@@ -146,77 +133,89 @@ func (s *Store) CompressExisting(ctx context.Context, log *slog.Logger) error {
 	return err
 }
 
-// swapToCompressed replaces the plain object p with the gzip file tmp, keeping
-// its mtime (Delete's last-put check). It answers the compressed size, or 0
-// when p is no longer there to replace.
-func (s *Store) swapToCompressed(hash, p, tmp string, mtime time.Time) (int64, error) {
+// compressBlob is compressFile on the plain blob b; "" also when b is gone.
+func (s *Store) compressBlob(b Blob, size int64) (string, error) {
+	if size < minCompressSize || size > maxCompressSize {
+		return "", nil
+	}
+	r, _, err := s.blobs.Open(b)
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer goutils.CloseQuietly(r)
+	return s.compressFile(r, size)
+}
+
+// swapToCompressed replaces the plain blob of hash with the gzip file tmp,
+// keeping its mtime (Delete's last-put check). It answers the compressed
+// size, or 0 when the plain blob is no longer there to replace.
+func (s *Store) swapToCompressed(hash, tmp string, mtime time.Time) (int64, error) {
 	defer s.lock(hash)()
-	fi, err := os.Stat(p)
-	if os.IsNotExist(err) {
+	plain, gz := Blob{Hash: hash}, Blob{Hash: hash, Gzip: true}
+	info, err := s.blobs.Stat(plain)
+	if errors.Is(err, ErrNotFound) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
 	// A Put since the scan bumped the mtime: keep the newer one.
-	if fi.ModTime().After(mtime) {
-		mtime = fi.ModTime()
+	if info.ModTime.After(mtime) {
+		mtime = info.ModTime
 	}
-	if err := os.Chtimes(tmp, mtime, mtime); err != nil {
+	// The gzip blob is durable before the plain one goes, so Open always
+	// finds one.
+	if err := s.blobs.Import(tmp, gz, mtime); err != nil {
 		return 0, err
 	}
-	// The .gz appears before the plain file goes, so Open always finds one.
-	if err := os.Rename(tmp, p+gzSuffix); err != nil {
+	if err := s.blobs.Remove(plain); err != nil && !errors.Is(err, ErrNotFound) {
 		return 0, err
 	}
-	// Make the .gz durable before the plain file goes.
-	if err := syncDir(filepath.Dir(p)); err != nil {
-		return 0, err
-	}
-	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	gz, err := os.Stat(p + gzSuffix)
+	gzInfo, err := s.blobs.Stat(gz)
 	if err != nil {
 		return 0, err
 	}
-	return gz.Size(), nil
+	return gzInfo.Size, nil
 }
 
-// gzipSize reads the uncompressed length from the gzip trailer (ISIZE).
-func gzipSize(f *os.File) (int64, error) {
+// gzipSize reads the uncompressed length from the gzip trailer (ISIZE) of
+// the size bytes of r.
+func gzipSize(r io.ReadSeeker, size int64) (int64, error) {
 	var b [4]byte
-	fi, err := f.Stat()
-	if err != nil {
+	if size < 18 {
+		return 0, errors.New("cas: gzip object too short")
+	}
+	if _, err := r.Seek(size-4, io.SeekStart); err != nil {
 		return 0, err
 	}
-	if fi.Size() < 18 {
-		return 0, fmt.Errorf("cas: gzip object too short: %s", f.Name())
-	}
-	if _, err := f.ReadAt(b[:], fi.Size()-4); err != nil {
+	if _, err := io.ReadFull(r, b[:]); err != nil {
 		return 0, err
 	}
 	return int64(binary.LittleEndian.Uint32(b[:])), nil
 }
 
 // gzipReader is an io.ReadSeekCloser over the uncompressed bytes of a gzip
-// file. Seeking only moves the offset; a read decompresses forward to it, or
+// blob. Seeking only moves the offset; a read decompresses forward to it, or
 // restarts from the beginning to go back (http.ServeContent seeks back once,
 // after sniffing the first 512 bytes, which is cheap).
 type gzipReader struct {
-	f    *os.File
+	f    io.ReadSeekCloser
 	size int64
 	off  int64 // requested offset
 	pos  int64 // offset zr is at
 	zr   *gzip.Reader
 }
 
-func newGzipReader(f *os.File) (*gzipReader, error) {
-	size, err := gzipSize(f)
+// newGzipReader reads the gzip blob f of stored length size.
+func newGzipReader(f io.ReadSeekCloser, size int64) (*gzipReader, error) {
+	n, err := gzipSize(f, size)
 	if err != nil {
 		return nil, err
 	}
-	return &gzipReader{f: f, size: size}, nil
+	return &gzipReader{f: f, size: n}, nil
 }
 
 func (g *gzipReader) Seek(offset int64, whence int) (int64, error) {

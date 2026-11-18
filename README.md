@@ -46,6 +46,13 @@ Each namespace is a separate store under its own directory (`<root>`, by
 default `<STORAGE_DIR>/<namespace>`); namespaces share nothing, so the same
 content put in two namespaces is stored twice.
 
+The blobs go through a storage provider (`cas.Backend`: import, open, stat,
+touch, remove, walk). The only provider today is the file system
+(`cas.FSBackend`, `<root>/objects`); hashing, deduplication, compression,
+labels and locking sit above it in `cas.Store`, so another provider (e.g. S3)
+only has to store bytes. Uploads are staged and labels kept under `<root>`
+whatever the provider.
+
 1. The body is streamed to `<root>/tmp` while its SHA-256 is computed, then synced.
 2. It is renamed atomically to `<root>/objects/ab/cd/<hash>` (two levels of 2-hex shards).
 3. A put of an object that already exists only refreshes its mtime. `DELETE`

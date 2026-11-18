@@ -22,8 +22,8 @@ var (
 
 func onDisk(t *testing.T, s *Store, hash string) (plain, gz bool) {
 	t.Helper()
-	_, err := os.Stat(s.objectPath(hash))
-	_, errGz := os.Stat(s.objectPath(hash) + gzSuffix)
+	_, err := os.Stat(objectPath(s, hash))
+	_, errGz := os.Stat(objectPath(s, hash) + gzSuffix)
 	return err == nil, errGz == nil
 }
 
@@ -38,7 +38,7 @@ func readBack(t *testing.T, s *Store, hash string) ([]byte, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return got, fi.Size()
+	return got, fi.Size
 }
 
 func TestPutCompressesTextOnly(t *testing.T) {
@@ -131,7 +131,7 @@ func TestCompressExisting(t *testing.T) {
 	xml, _, _, _ := s.Put(bytes.NewReader(xmlDoc))
 	pdf, _, _, _ := s.Put(bytes.NewReader(pdfDoc))
 	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
-	_ = os.Chtimes(s.objectPath(xml), old, old)
+	_ = os.Chtimes(objectPath(s, xml), old, old)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := s.CompressExisting(context.Background(), log); err != nil {

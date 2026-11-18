@@ -124,7 +124,7 @@ func (s *Store) importLabelFiles(dir string) error {
 				return nil
 			}
 			files = append(files, p)
-			if !s.exists(s.objectPath(hash)) {
+			if !s.exists(hash) {
 				return nil
 			}
 			b, err := os.ReadFile(p)
@@ -204,7 +204,7 @@ func (s *Store) dropLabels(hash string) error {
 
 // Labels answers the object's labels (empty when it has none).
 func (s *Store) Labels(hash string) (m map[string]string, err error) {
-	if !ValidHash(hash) || !s.exists(s.objectPath(hash)) {
+	if !ValidHash(hash) || !s.exists(hash) {
 		return nil, ErrNotFound
 	}
 	err = s.db.View(func(tx *bolt.Tx) error {
@@ -257,7 +257,7 @@ func (s *Store) DeleteLabel(hash, key string) error {
 // run more than once, so it must only depend on the map it gets.
 func (s *Store) updateLabels(hash string, change func(map[string]string) bool) error {
 	defer s.lock(hash)()
-	if !s.exists(s.objectPath(hash)) {
+	if !s.exists(hash) {
 		return ErrNotFound
 	}
 	return s.db.Batch(func(tx *bolt.Tx) error {

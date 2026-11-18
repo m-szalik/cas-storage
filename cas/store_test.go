@@ -51,8 +51,8 @@ func TestPutIsContentAddressedAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer goutils.CloseQuietly(f)
-	if fi.Size() != int64(len(content)) {
-		t.Fatalf("stat size = %d", fi.Size())
+	if fi.Size != int64(len(content)) {
+		t.Fatalf("stat size = %d", fi.Size)
 	}
 	got, _ := io.ReadAll(f)
 	if !bytes.Equal(got, content) {
@@ -108,4 +108,9 @@ func TestMkdirAllCreatesNestedAndExisting(t *testing.T) {
 	if err := mkdirAll(file); err == nil {
 		t.Fatal("mkdirAll over a file: want an error")
 	}
+}
+
+// objectPath is where the file-system backend keeps hash's plain blob.
+func objectPath(s *Store, hash string) string {
+	return s.blobs.(*FSBackend).path(Blob{Hash: hash})
 }

@@ -26,7 +26,7 @@ func TestDeleteSparesARecentlyPutObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(s.objectPath(hash), old, old); err != nil {
+	if err := os.Chtimes(objectPath(s, hash), old, old); err != nil {
 		t.Fatal(err)
 	}
 	cut := time.Now().Add(-24 * time.Hour)
@@ -39,7 +39,7 @@ func TestDeleteSparesARecentlyPutObject(t *testing.T) {
 		t.Fatalf("delete of a re-put object = %d, %v, %v", size, deleted, err)
 	}
 
-	if err := os.Chtimes(s.objectPath(hash), old, old); err != nil {
+	if err := os.Chtimes(objectPath(s, hash), old, old); err != nil {
 		t.Fatal(err)
 	}
 	if size, deleted, err := s.Delete(hash, cut); err != nil || !deleted || size != 5 {

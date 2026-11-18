@@ -140,7 +140,7 @@ func Handler(auth *Auth, log *slog.Logger, allowDelete bool) http.Handler {
 		}
 		defer goutils.CloseQuietly(f)
 		// ServeContent adds Range, conditional and content sniffing for free.
-		http.ServeContent(w, r, hash, fi.ModTime(), f)
+		http.ServeContent(w, r, hash, fi.ModTime, f)
 	}
 	handle("GET /objects/{hash}", PermRead, serveObject)
 	handle("HEAD /objects/{hash}", PermRead, serveObject)
