@@ -69,3 +69,7 @@ size, deleted, err := c.DeleteObject(ctx, hash, time.Now().Add(-24*time.Hour))
 
 One replica on one volume (no HA), no auth, no encryption at rest, no
 listing, no metrics, no scrubbing of stored hashes.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
