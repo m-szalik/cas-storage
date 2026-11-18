@@ -17,7 +17,7 @@ before; every route works on the key's namespace only.
 
 | Method | Path | Permission | Result |
 |---|---|---|---|
-| `POST` | `/objects` | `CREATE` | stores the request body; `201` new / `200` already present; JSON `{"hash","size","existed"}`, `Location: /objects/<hash>` |
+| `POST` | `/objects` | `CREATE` | stores the request body; `201` new / `200` already present; JSON `{"hash","size","existed"}`, `Location: /objects/<hash>`; `413` over the namespace's `max_upload_size` |
 | `GET` | `/objects/{hash}` | `READ` | streams the object (Range and conditional requests supported); `404` if absent |
 | `HEAD` | `/objects/{hash}` | `READ` | existence and size |
 | `DELETE` | `/objects/{hash}?unused_before=<RFC 3339>` | `DELETE` | only with `STORAGE_ALLOW_DELETE=true`: removes the object (and its labels) unless it was put at or after that time; `200 {"size","deleted"}`, `404` if absent |
@@ -76,9 +76,11 @@ A Range read of a compressed object decompresses from its beginning.
 The config file:
 
 ```yaml
+max_upload_size: 500MB      # optional, the default; 0 = no limit
 namespaces:
   docs:
     path: /data/docs        # optional, default <STORAGE_DIR>/docs
+    max_upload_size: 2GiB   # optional, overrides the global limit
   images: {}
 keys:
   - key: "a-long-random-secret-1"
@@ -96,6 +98,10 @@ keys:
 3. A malformed or invalid file stops the start. A missing file, or one with no
    keys, is logged as a warning and every request gets `401`.
 4. Keys are never logged; the request log names the namespace.
+5. `max_upload_size` caps a `POST /objects` body (`413` above it), globally
+   and per namespace. It is a number of bytes or a size with a unit: `B`,
+   `KB`, `MB`, `GB`, `TB` (powers of 1000) or `KiB`, `MiB`, `GiB`, `TiB`
+   (powers of 1024). Default `500MB`; `0` means no limit.
 
 Objects stored before namespaces existed sit in `<STORAGE_DIR>/objects`; to
 keep serving them, give one namespace `path: <STORAGE_DIR>` (and name no other

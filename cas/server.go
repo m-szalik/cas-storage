@@ -96,7 +96,21 @@ func Handler(auth *Auth, log *slog.Logger, allowDelete bool) http.Handler {
 	}
 
 	handle("POST /objects", PermCreate, func(w http.ResponseWriter, r *http.Request) {
-		hash, size, existed, err := storeOf(r).Put(r.Body)
+		store := storeOf(r)
+		body := r.Body
+		if store.MaxUploadSize > 0 {
+			if r.ContentLength > store.MaxUploadSize {
+				http.Error(w, "object too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			body = http.MaxBytesReader(w, r.Body, store.MaxUploadSize)
+		}
+		hash, size, existed, err := store.Put(body)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "object too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		if err != nil {
 			log.Error("put object", "namespace", accessOf(r).namespace, "err", err)
 			http.Error(w, "store failed", http.StatusInternalServerError)

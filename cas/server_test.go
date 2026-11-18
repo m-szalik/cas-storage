@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -264,5 +265,31 @@ func TestRequestLogHasNamespaceNotKey(t *testing.T) {
 	out, _ := io.ReadAll(&buf)
 	if !strings.Contains(string(out), "namespace=test") || strings.Contains(string(out), testKey) {
 		t.Fatalf("log = %s", out)
+	}
+}
+
+func TestPutRejectsTooLargeUpload(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.MaxUploadSize = 10
+	h := withTestKey(Handler(testAuth(s), slog.New(slog.DiscardHandler), false))
+	if code, _ := call(t, h, "POST", "/objects", "0123456789"); code != http.StatusCreated {
+		t.Fatalf("at the limit: %d", code)
+	}
+	if code, _ := call(t, h, "POST", "/objects", "0123456789a"); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over the limit (Content-Length): %d", code)
+	}
+	// Without Content-Length (chunked) the limit cuts the stream.
+	req := httptest.NewRequest("POST", "/objects", io.MultiReader(strings.NewReader("01234"), strings.NewReader("56789abc")))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over the limit (chunked): %d", rec.Code)
+	}
+	if entries, _ := os.ReadDir(s.tmpDir); len(entries) != 0 {
+		t.Fatalf("temp files left: %d", len(entries))
 	}
 }

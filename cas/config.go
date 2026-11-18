@@ -31,14 +31,19 @@ var namespaceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
 // Config is the YAML configuration: the namespaces and the API keys.
 type Config struct {
-	Namespaces map[string]NamespaceConfig `yaml:"namespaces"`
-	Keys       []KeyConfig                `yaml:"keys"`
+	// MaxUploadSize caps a POST /objects body; unset means
+	// DefaultMaxUploadSize, 0 no limit.
+	MaxUploadSize *ByteSize                  `yaml:"max_upload_size"`
+	Namespaces    map[string]NamespaceConfig `yaml:"namespaces"`
+	Keys          []KeyConfig                `yaml:"keys"`
 }
 
 // NamespaceConfig describes one namespace (a fully separate store).
 type NamespaceConfig struct {
 	// Path is the store root; empty means <STORAGE_DIR>/<namespace>.
 	Path string `yaml:"path"`
+	// MaxUploadSize overrides Config.MaxUploadSize for this namespace.
+	MaxUploadSize *ByteSize `yaml:"max_upload_size"`
 }
 
 // KeyConfig is one API key, bound to exactly one namespace.
@@ -89,6 +94,10 @@ func LoadConfig(path, storageDir string, compress bool) (*Auth, error) {
 func (c Config) Open(storageDir string, compress bool) (*Auth, error) {
 	paths := map[string]string{} // cleaned absolute path -> namespace
 	roots := map[string]string{} // namespace -> root
+	maxUpload := DefaultMaxUploadSize
+	if c.MaxUploadSize != nil {
+		maxUpload = *c.MaxUploadSize
+	}
 	for name, ns := range c.Namespaces {
 		if !namespaceRe.MatchString(name) {
 			return nil, fmt.Errorf("invalid namespace name %q", name)
@@ -140,6 +149,10 @@ func (c Config) Open(storageDir string, compress bool) (*Auth, error) {
 			return nil, fmt.Errorf("namespace %s: %w", name, err)
 		}
 		s.Compress = compress
+		s.MaxUploadSize = int64(maxUpload)
+		if ns := c.Namespaces[name]; ns.MaxUploadSize != nil {
+			s.MaxUploadSize = int64(*ns.MaxUploadSize)
+		}
 		auth.Namespaces[name] = s
 	}
 	for _, a := range auth.keys {

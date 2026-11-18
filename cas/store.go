@@ -37,6 +37,9 @@ type Store struct {
 	// Compress stores new text, XML, HTML and JSON objects gzipped (see
 	// compress.go). Objects already gzipped are read either way.
 	Compress bool
+	// MaxUploadSize is the largest object the HTTP API accepts, 0 for no
+	// limit (Put itself does not check it).
+	MaxUploadSize int64
 	// locks serialise, per hash, the steps that pick or change an object's
 	// on-disk form or its labels (lock striping: different objects rarely
 	// share a lock, so they do not wait for each other).

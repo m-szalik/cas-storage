@@ -86,10 +86,49 @@ func TestLoadConfigRejectsInvalid(t *testing.T) {
 		"unknown perm":     {"namespaces:\n  a: {}\nkeys:" + key(good, "a", "READ, WRITE"), "unknown permission"},
 		"lowercase perm":   {"namespaces:\n  a: {}\nkeys:" + key(good, "a", "read"), "unknown permission"},
 		"no perms":         {"namespaces:\n  a: {}\nkeys:" + key(good, "a", ""), "no permissions"},
+		"bad size":         {"max_upload_size: 5XB", "invalid size"},
+		"negative size":    {"namespaces:\n  a: {max_upload_size: -1}", "invalid size"},
 	} {
 		_, err := LoadConfig(writeConfig(t, c.yaml), t.TempDir(), false)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
+}
+
+func TestMaxUploadSize(t *testing.T) {
+	auth, err := LoadConfig(writeConfig(t, `
+namespaces:
+  dflt: {}
+  big: {max_upload_size: 2GiB}
+  open: {max_upload_size: 0}
+`), t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ns, want := range map[string]int64{"dflt": 500_000_000, "big": 2 << 30, "open": 0} {
+		if got := auth.Namespaces[ns].MaxUploadSize; got != want {
+			t.Errorf("%s: MaxUploadSize = %d, want %d", ns, got, want)
+		}
+	}
+	auth, err = LoadConfig(writeConfig(t, "max_upload_size: 10KB\nnamespaces:\n  a: {}\n  b: {max_upload_size: 1024}"), t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := auth.Namespaces["a"].MaxUploadSize, auth.Namespaces["b"].MaxUploadSize; a != 10_000 || b != 1024 {
+		t.Fatalf("a = %d, b = %d", a, b)
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	for in, want := range map[string]ByteSize{"0": 0, "1024": 1024, "12B": 12, "500MB": 500e6, "500 MB": 500e6, "1KiB": 1024, "3GiB": 3 << 30, "1TB": 1e12} {
+		if got, err := ParseByteSize(in); err != nil || got != want {
+			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "MB", "-1", "1.5GB", "10mb", "99999999999TiB"} {
+		if _, err := ParseByteSize(in); err == nil {
+			t.Errorf("ParseByteSize(%q): want an error", in)
 		}
 	}
 }
