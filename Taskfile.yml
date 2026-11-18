@@ -1,0 +1,53 @@
+version: '3'
+
+vars:
+  GO: '{{.GO | default "go"}}'
+  IMAGE: '{{.IMAGE | default "cas-storage"}}'
+  VER:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+
+tasks:
+  default:
+    desc: List the tasks
+    cmds:
+      - task --list
+    silent: true
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - '{{.GO}} fmt ./...'
+
+  lint:
+    desc: Run go vet and golangci-lint (when installed)
+    cmds:
+      - '{{.GO}} vet ./...'
+      - 'if command -v golangci-lint >/dev/null; then golangci-lint run ./...; else echo "golangci-lint not installed, skipped"; fi'
+
+  test:
+    desc: Run the tests
+    cmds:
+      - '{{.GO}} test ./...'
+
+  build:
+    desc: Build bin/cas-storage
+    cmds:
+      - 'CGO_ENABLED=0 {{.GO}} build -trimpath -o bin/cas-storage ./cmd/cas-storage'
+
+  run:
+    desc: 'Run locally on :8080 with ./data (e.g. STORAGE_COMPRESS=true task run)'
+    deps: [build]
+    cmds:
+      - 'STORAGE_DIR=./data LISTEN_ADDR=:8080 ./bin/cas-storage'
+
+  image:
+    desc: 'Build the Docker image {{.IMAGE}}:<git describe>'
+    cmds:
+      - 'docker build --build-arg VER={{.VER}} -t {{.IMAGE}}:{{.VER}} .'
+
+  deploy:
+    desc: 'Apply deploy/kubernetes.yaml to the namespace NS (kubectl from $KUBECONFIG), e.g. task deploy NS=storage'
+    requires:
+      vars: [NS]
+    cmds:
+      - 'kubectl -n {{.NS}} apply -f deploy/kubernetes.yaml'

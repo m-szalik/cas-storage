@@ -1,0 +1,73 @@
+# cas-storage: one replica on one ReadWriteOnce volume (Recreate, so two pods
+# never write the same directory). Set the image to the one you pushed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cas-storage-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cas-storage
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cas-storage
+  template:
+    metadata:
+      labels:
+        app: cas-storage
+    spec:
+      securityContext:
+        fsGroup: 65532
+      containers:
+        - name: cas-storage
+          image: cas-storage:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: STORAGE_DIR
+              value: /data
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: STORAGE_ALLOW_DELETE
+              value: "false"
+            - name: STORAGE_COMPRESS
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cas-storage-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cas-storage
+spec:
+  selector:
+    app: cas-storage
+  ports:
+    - port: 8080
+      targetPort: 8080
