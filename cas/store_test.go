@@ -88,3 +88,24 @@ func TestOpenMissingReturnsNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestMkdirAllCreatesNestedAndExisting(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b", "c")
+	if err := mkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("stat %s: %v", dir, err)
+	}
+	if err := mkdirAll(dir); err != nil {
+		t.Fatalf("existing dir: %v", err)
+	}
+	file := filepath.Join(root, "f")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mkdirAll(file); err == nil {
+		t.Fatal("mkdirAll over a file: want an error")
+	}
+}

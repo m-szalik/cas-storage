@@ -161,7 +161,8 @@ func (s *Store) writeLabels(hash string, m map[string]string) error {
 }
 
 // writeFileAtomic writes b to a temp file, flushes it and renames it to p, so
-// p is always either the old or the new content.
+// p is always either the old or the new content; the directory is synced so
+// the rename survives a crash.
 func (s *Store) writeFileAtomic(p string, b []byte) error {
 	tmp, err := os.CreateTemp(s.tmpDir, "labels-*")
 	if err != nil {
@@ -180,10 +181,13 @@ func (s *Store) writeFileAtomic(p string, b []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := mkdirAll(filepath.Dir(p)); err != nil {
 		return err
 	}
-	return os.Rename(name, p)
+	if err := os.Rename(name, p); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(p))
 }
 
 // dropLabels removes all of hash's labels. The caller holds hash's lock.

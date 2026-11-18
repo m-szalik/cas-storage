@@ -52,7 +52,7 @@ func Open(root string) (*Store, error) {
 		labelsDir:  filepath.Join(root, "labels"),
 	}
 	for _, d := range []string{s.objectsDir, s.tmpDir, s.labelsDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := mkdirAll(d); err != nil {
 			return nil, fmt.Errorf("cas: mkdir %s: %w", d, err)
 		}
 	}
@@ -130,13 +130,53 @@ func (s *Store) Put(r io.Reader) (hash string, size int64, existed bool, err err
 	if s.touch(s.objectPath(hash)) {
 		return hash, size, true, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := mkdirAll(filepath.Dir(dst)); err != nil {
 		return "", 0, false, fmt.Errorf("cas: mkdir shard: %w", err)
 	}
 	if err := os.Rename(src, dst); err != nil {
 		return "", 0, false, fmt.Errorf("cas: rename: %w", err)
 	}
+	// The new name is durable only once its directory is synced: without
+	// it a power loss could lose an object already answered as created.
+	if err := syncDir(filepath.Dir(dst)); err != nil {
+		return "", 0, false, fmt.Errorf("cas: sync shard: %w", err)
+	}
 	return hash, size, false, nil
+}
+
+// mkdirAll is os.MkdirAll that also syncs the parent of every directory it
+// creates, so the new entries survive a crash.
+func mkdirAll(dir string) error {
+	if fi, err := os.Stat(dir); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s: not a directory", dir)
+		}
+		return nil
+	}
+	parent := filepath.Dir(dir)
+	if parent != dir {
+		if err := mkdirAll(parent); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	return syncDir(parent)
+}
+
+// syncDir flushes the directory dir, making its entries (renames, new files
+// and subdirectories) durable.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer goutils.CloseQuietly(f)
+	return f.Sync()
 }
 
 // exists reports whether the object at p is stored in either form.

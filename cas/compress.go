@@ -169,6 +169,10 @@ func (s *Store) swapToCompressed(hash, p, tmp string, mtime time.Time) (int64, e
 	if err := os.Rename(tmp, p+gzSuffix); err != nil {
 		return 0, err
 	}
+	// Make the .gz durable before the plain file goes.
+	if err := syncDir(filepath.Dir(p)); err != nil {
+		return 0, err
+	}
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
