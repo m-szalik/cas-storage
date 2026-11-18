@@ -1,0 +1,468 @@
+openapi: 3.1.0
+info:
+  title: cas-storage
+  version: "1"
+  summary: Immutable, content-addressed file store
+  description: |
+    The id of an object is the hex SHA-256 of its content, so storing the same
+    bytes twice keeps one copy. Objects are immutable; a caller may attach
+    `key=value` labels to them and search by label.
+
+    Every request except `GET /healthz` needs an API key, sent as
+    `X-API-Key: <key>` or `Authorization: Bearer <key>`. A key belongs to one
+    namespace, a fully separate store: an object or label of one namespace
+    does not exist for the keys of another. A key grants some of the
+    permissions `READ`, `CREATE`, `DELETE` and `LABEL`; each operation names
+    the one it needs. A missing or unknown key gets `401`, a key without the
+    permission `403`.
+
+    Error responses carry a short `text/plain` message.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:8080
+
+security:
+  - apiKey: []
+  - bearer: []
+
+tags:
+  - name: objects
+    description: Store, read and delete immutable objects.
+  - name: labels
+    description: key=value labels on objects, and search by label.
+  - name: health
+    description: Liveness, without an API key.
+
+paths:
+  /objects:
+    post:
+      tags: [objects]
+      operationId: putObject
+      summary: Store an object
+      description: |
+        Stores the request body (streamed, any content). Permission `CREATE`.
+        Putting content that already exists stores nothing new but refreshes
+        its last-put time, which protects it from a `DELETE` with an earlier
+        `unused_before`.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              contentMediaType: application/octet-stream
+      responses:
+        "201":
+          description: Stored as a new object.
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PutResult"
+        "200":
+          description: The content was already stored (`existed` is true).
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PutResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: The body exceeds the namespace's `max_upload_size`.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags: [labels]
+      operationId: findByLabels
+      summary: Find objects by labels
+      description: |
+        Answers the objects carrying every given label. Permission `READ`.
+        There is no listing of all objects: at least one `label` is required.
+      parameters:
+        - name: label
+          in: query
+          required: true
+          description: |
+            A selector `key=value`, or `key` (also `key=`) for any value.
+            Repeat it to require several labels (AND). The same key twice
+            with different values is a `400`.
+          schema:
+            type: array
+            minItems: 1
+            items:
+              type: string
+          style: form
+          explode: true
+          example: [kind=pdf, year]
+      responses:
+        "200":
+          description: The matching hashes, sorted (empty when none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /objects/{hash}:
+    parameters:
+      - $ref: "#/components/parameters/Hash"
+    get:
+      tags: [objects]
+      operationId: getObject
+      summary: Read an object
+      description: |
+        Streams the object's original bytes (a compressed object reads
+        unchanged). Permission `READ`. Range and conditional requests
+        (`If-Modified-Since`, `If-Range`, ...) are supported; `Content-Type`
+        is sniffed from the content.
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+          example: bytes=0-1023
+      responses:
+        "200":
+          description: The object.
+          headers:
+            Content-Length:
+              schema:
+                type: integer
+            Last-Modified:
+              description: When the object was last put.
+              schema:
+                type: string
+            Accept-Ranges:
+              schema:
+                type: string
+                const: bytes
+          content:
+            "*/*":
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        "206":
+          description: The requested range.
+          content:
+            "*/*":
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        "304":
+          description: Not modified (conditional request).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: The range cannot be satisfied.
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [objects]
+      operationId: headObject
+      summary: Check that an object exists
+      description: Like `GET` without the body. Permission `READ`.
+      responses:
+        "200":
+          description: The object exists.
+          headers:
+            Content-Length:
+              description: The object's (uncompressed) size.
+              schema:
+                type: integer
+            Last-Modified:
+              schema:
+                type: string
+        "401":
+          description: Missing or unknown API key.
+        "403":
+          description: The key lacks `READ`.
+        "404":
+          description: No such object.
+    delete:
+      tags: [objects]
+      operationId: deleteObject
+      summary: Delete an object
+      description: |
+        Removes the object and its labels unless it was put at or after
+        `unused_before`, so a caller that has just put it again is never
+        robbed of it. Permission `DELETE`; the route exists only when the
+        server runs with `STORAGE_ALLOW_DELETE=true` (otherwise `405`).
+      parameters:
+        - name: unused_before
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          example: "2026-11-01T00:00:00Z"
+      responses:
+        "200":
+          description: The object was found; `deleted` tells whether it was removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResult"
+        "400":
+          description: "`unused_before` missing or not RFC 3339."
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          description: Deletes are disabled on this server.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /objects/{hash}/labels:
+    parameters:
+      - $ref: "#/components/parameters/Hash"
+    get:
+      tags: [labels]
+      operationId: getLabels
+      summary: Read an object's labels
+      description: Permission `READ`.
+      responses:
+        "200":
+          description: The labels (`{}` when none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Labels"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /objects/{hash}/labels/{key}:
+    parameters:
+      - $ref: "#/components/parameters/Hash"
+      - $ref: "#/components/parameters/LabelKey"
+    put:
+      tags: [labels]
+      operationId: setLabel
+      summary: Set a label
+      description: |
+        Sets the label `key` to the request body. Permission `LABEL`. An
+        object has at most 64 labels.
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              $ref: "#/components/schemas/LabelValue"
+      responses:
+        "204":
+          description: Set.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: The body is over 4 KiB.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [labels]
+      operationId: deleteLabel
+      summary: Remove a label
+      description: Permission `LABEL`. Removing a label that is not set is not an error.
+      responses:
+        "204":
+          description: Removed (or was not set).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      tags: [health]
+      operationId: healthz
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: The server is up.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    bearer:
+      type: http
+      scheme: bearer
+      description: The same API key as a bearer token.
+
+  parameters:
+    Hash:
+      name: hash
+      in: path
+      required: true
+      description: The object id. A malformed one is a `404`.
+      schema:
+        $ref: "#/components/schemas/Hash"
+    LabelKey:
+      name: key
+      in: path
+      required: true
+      description: The label key; a `/` in it may be sent as is or as `%2F`.
+      schema:
+        $ref: "#/components/schemas/LabelKey"
+
+  headers:
+    Location:
+      description: The object's path, `/objects/<hash>`.
+      schema:
+        type: string
+
+  schemas:
+    Hash:
+      type: string
+      description: Hex SHA-256 of the object's content.
+      pattern: "^[0-9a-f]{64}$"
+      example: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    LabelKey:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$"
+      example: kind
+    LabelValue:
+      type: string
+      description: 1–256 bytes of UTF-8 without NUL.
+      minLength: 1
+      maxLength: 256
+      example: pdf
+    Labels:
+      type: object
+      propertyNames:
+        $ref: "#/components/schemas/LabelKey"
+      additionalProperties:
+        $ref: "#/components/schemas/LabelValue"
+      maxProperties: 64
+      example:
+        kind: pdf
+        year: "2026"
+    PutResult:
+      type: object
+      required: [hash, size, existed]
+      properties:
+        hash:
+          $ref: "#/components/schemas/Hash"
+        size:
+          type: integer
+          format: int64
+          description: The object's size in bytes.
+        existed:
+          type: boolean
+          description: The content was already stored.
+    DeleteResult:
+      type: object
+      required: [size, deleted]
+      properties:
+        size:
+          type: integer
+          format: int64
+          description: The object's size in bytes.
+        deleted:
+          type: boolean
+          description: False when the object was put at or after `unused_before` and kept.
+    FindResult:
+      type: object
+      required: [hashes]
+      properties:
+        hashes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hash"
+
+  responses:
+    BadRequest:
+      description: A malformed label key, value or selector.
+      content:
+        text/plain:
+          schema:
+            type: string
+    Unauthorized:
+      description: Missing or unknown API key.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            const: Bearer
+      content:
+        text/plain:
+          schema:
+            type: string
+    Forbidden:
+      description: The key lacks the operation's permission.
+      content:
+        text/plain:
+          schema:
+            type: string
+    NotFound:
+      description: No such object in the key's namespace.
+      content:
+        text/plain:
+          schema:
+            type: string
+    InternalError:
+      description: A storage failure (logged on the server).
+      content:
+        text/plain:
+          schema:
+            type: string

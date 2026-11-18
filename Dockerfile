@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.25 AS build
+# The build runs on the builder's platform and cross-compiles, so multi-arch
+# images need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VER=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cas-storage ./cmd/cas-storage
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/cas-storage ./cmd/cas-storage
 
 FROM gcr.io/distroless/static:nonroot
 ARG VER=dev

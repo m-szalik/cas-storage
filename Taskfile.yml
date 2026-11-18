@@ -3,6 +3,7 @@ version: '3'
 vars:
   GO: '{{.GO | default "go"}}'
   IMAGE: '{{.IMAGE | default "cas-storage"}}'
+  CHART: deploy/helm/cas-storage
   VER:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
 
@@ -30,9 +31,37 @@ tasks:
       - '{{.GO}} test ./...'
 
   build:
-    desc: Build bin/cas-storage
+    desc: Build bin/cas-storage and bin/cascli
     cmds:
       - 'CGO_ENABLED=0 {{.GO}} build -trimpath -o bin/cas-storage ./cmd/cas-storage'
+      - 'CGO_ENABLED=0 {{.GO}} build -trimpath -o bin/cascli ./cmd/cascli'
+
+  dist:
+    desc: 'Build release archives into dist/: cascli for linux, darwin and windows, cas-storage for linux (amd64, arm64), plus sha256sums.txt'
+    vars:
+      VERSION: '{{.VERSION | default .VER}}'
+    cmds:
+      - rm -rf dist && mkdir -p dist
+      - |
+        set -eu
+        build() { # name os arch
+          out="dist/$1_{{.VERSION}}_$2_$3"
+          ext=""; [ "$2" = windows ] && ext=.exe
+          mkdir -p "$out"
+          CGO_ENABLED=0 GOOS=$2 GOARCH=$3 {{.GO}} build -trimpath -ldflags "-s -w -X main.version={{.VERSION}}" -o "$out/$1$ext" ./cmd/$1
+          cp LICENSE README.md "$out/"
+          if [ "$2" = windows ]; then
+            (cd dist && zip -qr "$(basename "$out").zip" "$(basename "$out")")
+          else
+            tar -C dist -czf "$out.tar.gz" "$(basename "$out")"
+          fi
+          rm -rf "$out"
+        }
+        for os in linux darwin windows; do
+          for arch in amd64 arm64; do build cascli $os $arch; done
+        done
+        for arch in amd64 arm64; do build cas-storage linux $arch; done
+        (cd dist && sha256sum *.tar.gz *.zip > sha256sums.txt)
 
   run:
     desc: 'Run locally on :8080 with ./data and config.example.yaml (e.g. STORAGE_COMPRESS=true task run)'
@@ -51,3 +80,25 @@ tasks:
       vars: [NS]
     cmds:
       - 'kubectl -n {{.NS}} apply -f deploy/kubernetes.yaml'
+
+  openapi:lint:
+    desc: Lint api/openapi.yaml with Redocly (needs npx)
+    cmds:
+      - 'npx -y @redocly/cli@1.34.5 lint api/openapi.yaml'
+
+  helm:lint:
+    desc: Lint the Helm chart
+    cmds:
+      - 'helm lint {{.CHART}} --strict'
+
+  helm:template:
+    desc: 'Render the Helm chart (optional VALUES=<file>), e.g. task helm:template VALUES=my-values.yaml'
+    cmds:
+      - 'helm template cas-storage {{.CHART}}{{if .VALUES}} -f {{.VALUES}}{{end}}'
+
+  helm:install:
+    desc: 'Install or upgrade the Helm release in the namespace NS (kubectl context from $KUBECONFIG), e.g. task helm:install NS=storage VALUES=my-values.yaml'
+    requires:
+      vars: [NS]
+    cmds:
+      - 'helm upgrade --install cas-storage {{.CHART}} -n {{.NS}} --create-namespace{{if .VALUES}} -f {{.VALUES}}{{end}}'

@@ -1,0 +1,14 @@
+cas-storage is reachable in the cluster at:
+
+  http://{{ include "cas-storage.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Every request except /healthz needs an API key (X-API-Key or Authorization: Bearer).
+{{- if and (not .Values.existingSecret) (empty .Values.config.keys) }}
+
+WARNING: no API keys are configured, so every request gets 401.
+Set `config.keys` (and `config.namespaces`) or `existingSecret`.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence is disabled; objects are lost when the pod goes.
+{{- end }}

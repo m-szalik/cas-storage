@@ -8,6 +8,10 @@ the metadata about what an object means belongs to the caller.
 
 ## API
 
+The full description is the OpenAPI 3.1 document
+[`api/openapi.yaml`](api/openapi.yaml); a test keeps it in line with the
+routes.
+
 Every request except `GET /healthz` needs an API key, sent as
 `X-API-Key: <key>` or `Authorization: Bearer <key>`. A key belongs to one
 namespace and carries permissions (see [Configuration](#configuration));
@@ -134,12 +138,91 @@ err = c.DeleteLabel(ctx, hash, "kind")
 hashes, err := c.FindByLabels(ctx, map[string]string{"kind": "pdf", "source": ""}) // "" = any value
 ```
 
+## CLI
+
+`cascli` (a binary from the GitHub Releases, `go install
+github.com/m-szalik/cas-storage/cmd/cascli@latest`, or `task build` →
+`bin/cascli`) wraps the Go client. The server and the key come
+from the environment only, so the key stays out of the shell history:
+
+```sh
+export CAS_URL=http://cas-storage:8080   # default http://localhost:8080
+export CAS_API_KEY=a-long-random-secret  # required
+
+hash=$(cascli put report.pdf -l kind=pdf -l year=2026)   # or: cascli put - < file
+cascli get "$hash" -o report.pdf          # stdout without -o
+cascli exists "$hash"                     # exit 0 present, 1 absent
+cascli labels "$hash"                     # key=value lines
+cascli label set "$hash" lang=en src=ted
+cascli label delete "$hash" src
+cascli find kind=pdf year                 # hashes; a bare key matches any value
+cascli delete "$hash" --unused-before 24h # or an RFC 3339 time
+```
+
+Errors exit with 2 (and `exists` with 1 for an absent object).
+
 ## Development
 
 `task` lists the tasks: `test`, `lint`, `build`, `run` (uses
 `config.example.yaml`, namespace `dev`), `image`, `deploy NS=<namespace>`
 (applies `deploy/kubernetes.yaml`, which carries the config as a Secret
-mounted at `/etc/cas-storage`; replace its placeholder keys).
+mounted at `/etc/cas-storage`; replace its placeholder keys), `helm:lint`,
+`helm:template [VALUES=<file>]`, `helm:install NS=<namespace> [VALUES=<file>]`.
+
+## Helm chart
+
+`deploy/helm/cas-storage` deploys the same single-replica setup (Recreate, one
+PVC kept on uninstall, non-root, read-only root file system):
+
+```yaml
+# my-values.yaml
+image:
+  repository: registry.example/cas-storage
+  tag: v1.2.3
+allowDelete: false
+compress: true
+config:                       # rendered into a Secret as config.yaml
+  max_upload_size: 500MB
+  namespaces:
+    docs: {}
+  keys:
+    - key: "a-long-random-secret"
+      namespace: docs
+      permissions: [READ, CREATE, DELETE, LABEL]
+# existingSecret: cas-storage-config   # or: a Secret with config.yaml, keeps keys out of values
+persistence:
+  size: 50Gi
+  storageClass: ""
+```
+
+```sh
+helm upgrade --install cas-storage oci://ghcr.io/m-szalik/charts/cas-storage --version 1.2.3 \
+  -n storage --create-namespace -f my-values.yaml
+# or from the working tree: helm upgrade --install cas-storage deploy/helm/cas-storage ...
+```
+
+A change to `config` restarts the pod (config checksum annotation); with
+`existingSecret`, restart it yourself after editing the Secret. See
+`values.yaml` for resources, scheduling and extra environment variables.
+
+## Publishing
+
+`.github/workflows/publish.yml` runs the tests and `helm lint`, then:
+
+1. On a push to `main`: image `ghcr.io/m-szalik/cas-storage` tagged `main` and
+   `sha-<short>`.
+2. On a tag `v1.2.3`: image tagged `1.2.3`, `1.2` and `latest`, and chart
+   `1.2.3` (appVersion `1.2.3`, so it runs that image) pushed to
+   `oci://ghcr.io/m-szalik/charts/cas-storage`.
+
+`.github/workflows/release.yml` runs on the same tags: `task dist` builds
+`cascli` (linux, darwin, windows) and `cas-storage` (linux), amd64 and arm64,
+and attaches the archives and `sha256sums.txt` to the GitHub Release of the tag
+(created with generated notes when missing).
+
+Images are built for `linux/amd64` and `linux/arm64` (cross-compiled, no
+emulation). Only `GITHUB_TOKEN` is used; new GHCR packages are private until
+made public in the package settings.
 
 ## Limits
 

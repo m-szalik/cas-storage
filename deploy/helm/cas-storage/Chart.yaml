@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cas-storage
+description: Immutable, content-addressed file store over HTTP with API keys, namespaces and labels
+type: application
+version: 0.1.0
+appVersion: "latest"
